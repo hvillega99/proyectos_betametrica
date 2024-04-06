@@ -1,0 +1,240 @@
+---
+title: "Proyecto de fin de módulo 2"
+author: "Héctor Villegas"
+date: "`r Sys.Date()`"
+output: github_document
+always_allow_html: true
+---
+
+```{r librerías, echo=TRUE, message=FALSE, warning=FALSE}
+library(openxlsx)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(dygraphs)
+library(knitr)
+```
+
+## Sección A.-
+
+### 1- Variables seleccionadas.
+
+Para el desarrollo del proyecto se trabajó con las siguientes variables obtenidas del Banco Central del Ecuador.
+
+#### Sector externo:
+
+-   Inversión extranjera directa.
+-   Comercio exterior importaciones.
+-   Comercio exterior exportaciones.
+
+#### Sector real:
+
+-   Inflación.
+-   Índice de confianza del consumidor.
+
+### 2- Gráfico de cajas.
+
+Se trabajó con una base de datos de inversión extranjera directa por país y por continente del periodo 2016 - 2023 con frecuencia trimestral:
+
+```{r db_ied, echo=TRUE, message=FALSE, warning=FALSE, comment='', collapse=TRUE}
+
+datos_ied <-  read.xlsx("D:\\Programa ECD\\M2\\proyecto\\datos\\sector_externo_ied_x_pais.xlsx", detectDates = T)
+
+datos_ied %>% 
+  head(n=5) %>% 
+  kable()
+```
+
+Debido a que no sería práctico presentar los gráficos de caja por cada país se seleccionaron únicamente los principales socios comerciales del Ecuador: Estados Unidos, la Comunidad Andina, Europa y China:
+
+```{r db_ied_edit}
+ied_cont <- melt(datos_ied, id.vars = c('País')) %>% 
+  filter(País %in% c('Estados Unidos de América', 'COMUNIDAD ANDINA', 'EUROPA', 'China')) %>% 
+  rename(Socio=País, periodo=variable) %>% 
+  mutate(value=value/1000) %>% 
+  mutate(anio=as.numeric(substr(periodo, 1, 4)),
+         trimestre=substr(periodo, 6, 8)) %>% 
+  select(-periodo) %>% 
+  select(Socio, anio, trimestre, everything()) %>% 
+  group_by(Socio, anio, trimestre)
+
+ied_cont %>% 
+  head(n=10) %>% 
+  kable()
+```
+
+```{r ied_boxplot, message=FALSE, fig.width=8, fig.height=7, fig.align='center'}
+ggplot(ied_cont)+
+  aes(x=factor(anio), y=value, fill=Socio)+
+  geom_boxplot()+
+  geom_jitter(width=0.1, alpha=0.8)+
+  facet_wrap(.~Socio, scales = 'free_x', labeller=labeller(Socio = c("China"="China", "COMUNIDAD ANDINA"="Comunidad Andina", "Estados Unidos de América"="Estados Unidos", "EUROPA"="Europa")))+
+  scale_fill_manual(values = c("China" = "#FFD700", "COMUNIDAD ANDINA" = "#FFA07A", "Estados Unidos de América" = "#ADD8E6", "EUROPA" = "#98FB98"),
+                    labels=c("China", "Comunidad Andina", "Estados Unidos", "Europa")) +
+  theme(legend.position = 'bottom',
+        axis.text.x = element_text(angle=90, hjust = 1),
+        text=element_text(size = 15))+
+  labs(title='Inversión extranjera directa recibida por Ecuador\nde sus socios comerciales',
+       subtitle = 'Acumuladas del 1er al 4to trimestre',
+       caption = 'Fuente: Banco Central del Ecuador\nElaboración: Héctor Villegas',
+       x='Periodo acumulado',
+       y='Millones de USD')
+```
+
+El gráfico muestra que Europa ha sido el socio comercial que más ha invertido en el Ecuador entre el 2016 y 2023.
+
+### 3- Gráfico de barras.
+
+Para realizar el gráfico de barras se utilizaron dos bases de datos:
+
+-   Importaciones por continente 2016 - 2023 con frecuencia trimestral.
+
+```{r db_import, message=TRUE, echo=FALSE}
+datos_import <- read.xlsx("D:\\Programa ECD\\M2\\proyecto\\datos\\sector_externo_importaciones_x_continente_2016_2023_tri.xlsx", detectDates = T, startRow = 7)
+
+datos_import %>% 
+  head() %>% 
+  kable()
+```
+
+-   Exportaciones por continente 2016 - 2023 con frecuencia trimestral.
+
+```{r datos_export, echo=FALSE, message=FALSE}
+datos_export <- read.xlsx("D:\\Programa ECD\\M2\\proyecto\\datos\\sector_externo_exportaciones_x_continente_2016_2023_tri.xlsx", detectDates = T, startRow = 7)
+
+datos_export %>% 
+  head() %>% 
+  kable()
+```
+
+Para ambas bases de datos se calculó el FOB total por cada año. Los datos resultantes se combinaron en un dataframe, el cual se usará para crear el gráfico.
+
+```{r message=FALSE}
+importaciones <- datos_import %>% 
+  mutate(Anio=as.numeric(substr(Período,1,4))) %>% 
+  filter(Continente.Origen!='SIN ESTADISTICAS') %>% 
+  group_by(Anio) %>% 
+  summarise(FOB=sum(FOB)) %>% 
+  round(2)
+
+
+exportaciones <- datos_export %>% 
+  mutate(Anio=as.numeric(substr(Período,1,4))) %>% 
+  filter(Continente.Destino!='SIN ESTADISTICAS') %>% 
+  group_by(Anio) %>% 
+  summarise(FOB=sum(FOB)) %>% 
+  round(2)
+
+importaciones$Operacion <- "importaciones"
+exportaciones$Operacion <- "exportaciones"
+datos_comercio <- rbind(importaciones, exportaciones)
+
+datos_comercio %>%
+  kable()
+```
+
+La variable seleccionada para el análisis es FOB (Free on Board) que indica el precio de un producto incluyendo los costos de transporte hasta el puerto de embarque.Esta métrica está presente tanto en la base de datos de importaciones como en la de exportaciones permitiendo la comparación directa a lo largo del tiempo.
+
+```{r comercio_barplot, fig.width=8, fig.height=6, fig.align='center', warning=FALSE, message=FALSE}
+ggplot(datos_comercio, aes(x = Anio, y = FOB, fill = Operacion)) +
+  geom_bar(stat = "identity", position = "dodge")+
+  scale_y_continuous(expand = c(0, 0))+
+  theme(legend.position = 'bottom',
+        axis.text.x = element_text(angle=90, hjust = 1),
+        text=element_text(size = 15))+
+  labs(title='Exportaciones e importaciones por año',
+       subtitle = 'Acumuladas del 1er al 4to trimestre',
+       caption = 'Fuente: Banco Central del Ecuador\n Elaboración: Héctor Villegas',
+       x='Periodo acumulado',
+       y='FOB en Millones de USD',
+       fill='Tipo de operación')+
+  scale_fill_brewer(palette = 'YlGn')
+```
+
+El gráfico de barras presenta una tendencia donde las exportaciones superan a las importaciones indicando una balanza comercial positiva en la mayoría de los años. Sin embargo, entre los años 2017 y 2019 la diferencia entre ambas categorías no es significativa.
+
+### 4- Gráficos de líneas.
+
+Para este gráfico se utilizaron dos bases de datos:
+
+-   Inflación mensual desde enero del 2019 hasta diciembre del 2023:
+
+```{r echo=TRUE, message=FALSE}
+datos_inflacion <- read.xlsx("D:\\Programa ECD\\M2\\proyecto\\datos\\G2.T2 Inflación Mensual (2005 - Actualidad).xlsx", startRow = 6)
+
+datos_inflacion %>% 
+  head() %>% 
+  kable()
+```
+
+-   Índice de confianza del consumidor mensual desde julio del 2020 hasta diciembre del 2023:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+datos_icc <- read.xlsx("D:\\Programa ECD\\M2\\proyecto\\datos\\Índice de confianza al consumidor - Mensual.xlsx", sheet = 'Indicador', startRow = 6, )[0:42,]
+
+datos_icc %>% 
+  head() %>% 
+  kable()
+```
+
+Las bases de datos fueron manipuladas para ajustarlas al formato adecuado, garantizando la coherencia de las variables a lo largo del periodo establecido. Finalmente, se combinaron en un dataframe para crear las gráficas.
+
+```{r message=FALSE, warning=FALSE}
+datos_inflacion$AÑO <- seq(as.Date("2019/01/01"), as.Date("2023/12/01"), by="month")
+
+datos_inflacion <- datos_inflacion %>% 
+  rename(Periodo=AÑO,
+         Inflación=NACIONAL) %>% 
+  mutate(Inflación=Inflación*100)
+
+meses <- c('Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+           'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
+
+datos_icc$Mes <-  match(trimws(datos_icc$Mes), meses)
+
+datos_icc <- datos_icc %>% 
+  arrange(Año, Mes) %>% 
+  mutate(Año=seq(as.Date("2020/07/01"), as.Date("2023/12/01"), by="month")) %>% 
+  rename(Periodo=Año)
+
+inf_icc_group <- full_join(datos_inflacion, datos_icc, by='Periodo') %>% 
+  select(Periodo, Inflación, Índice.de.Confianza.al.Consumidor) %>% 
+  na.omit() %>% 
+  melt(id.vars=c('Periodo'))
+
+inf_icc_group %>% 
+  head() %>% 
+  kable()
+```
+
+```{r fig.width=10, fig.height=4, fig.align='center', warning=FALSE, message=FALSE}
+ggplot(data=inf_icc_group)+
+  aes(x=Periodo, y=value)+
+  geom_line()+
+  geom_point(color='purple', alpha=0.8)+
+  geom_smooth(method='lm')+
+  theme(legend.position = 'bottom',
+        axis.text.x = element_text(angle=90, hjust = 1),
+        text=element_text(size = 15))+
+  facet_wrap(.~variable, scales='free_y', labeller = labeller(variable = c("Inflación" = "Inflación", "Índice.de.Confianza.al.Consumidor" = "Índice de confianza del consumidor")))
+```
+
+Las gráficas revelan una tendencia creciente en ambas variables durante el periodo examinado.
+
+### 5- Gráfico dinámico
+
+Se realizó un gráfico dinámico de inflación para el periodo entre enero del 2019 y diciembre del 2023. Sin embargo, este tipo de gráfico solo funciona en archivos HTML por lo que no se renderiza.
+
+```{r fig.width=14, fig.height=4, fig.align='center', warning=FALSE, message=FALSE}
+
+inflacion <- rename(datos_inflacion, Inflacion=Inflación)
+
+datady <- inflacion %>% 
+  select(Inflacion)
+
+tsdata <- ts(datady, start = c(2019, 1), frequency = 12)
+
+dygraph(tsdata, main='Evolución de la inflación en Ecuador', xlab = 'Periodo', ylab = 'Tasa porcentual') %>% 
+  dyOptions(fillGraph = T, fillAlpha = 0.04, drawPoints = T, pointSize = 3)
+
+```
