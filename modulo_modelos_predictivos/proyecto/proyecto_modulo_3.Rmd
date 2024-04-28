@@ -1,0 +1,338 @@
+---
+title: "Proyecto de fin de módulo 3"
+author: "Héctor Villegas"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+*Librerías utilizadas*
+
+```{r librerías, echo=TRUE, message=FALSE, warning=FALSE}
+library(forecast)
+library(openxlsx)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(lmtest)
+library(GGally)
+library(car)
+library(moments)
+library(ggplot2)
+library(nlme)
+library(sandwich)
+library(strucchange)
+```
+
+## Sección A.-
+
+### 1- Tasa de crecimiento de la oferta monetaria
+
+Se utilizó una base de datos de oferta monetaria del Banco Central del periodo enero del 2017 a agosto del 2022 con frecuencia mensual.
+
+```{r db_om, echo=TRUE, message=FALSE, warning=FALSE, comment='', collapse=TRUE}
+
+datos_om <-  read.xlsx("D:\\Programa ECD\\M3\\proyecto\\db\\Oferta Monetaria (M1) y Liquidez Total (M2) - Mensual (1).xlsx", startRow = 6)
+
+datos_om %>% 
+  head() %>% 
+  kable()
+```
+
+Se modificó la base de datos para convertir a serie de tiempo y generar la gráfica:
+
+```{r db_om2, warning=FALSE}
+
+db_om <- datos_om %>% 
+  mutate(X1=as.numeric(X1))
+
+meses <- c('Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+           'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre')
+
+db_om$X2 <-  match(trimws(db_om$X2), meses)
+
+db_om <- db_om %>% 
+  arrange(X1, X2) %>% 
+  na.omit() %>% 
+  rename(EMC=Especies.Monetarias.en.Circulación,
+         LT=Liquidez.Total.M2,
+         OM=Oferta.Monetaria.M1)
+  
+tsom <- ts(db_om[,3:5], start = c(2017, 1), frequency = 12)
+
+tsom %>% 
+  head()
+```
+
+```{r tsom_plot, fig.align='center'}
+plot(tsom[, 'OM'], ylab='Oferta monetaria', xlab='Tiempo')
+```
+
+Implementación del modelo:
+
+```{r m_om}
+tasa_om <- tslm(log(tsom[, 'OM']) ~ trend, data=tsom)
+summary(tasa_om)
+```
+
+Cálculo de la tasa de crecimiento:
+
+```{r t_om}
+(exp(tasa_om$coefficients[2])-1)*100
+```
+
+La tasa de crecimiento de la oferta monetaria es del 0.46% mensual entre enero del 2017 y agosto del 2022.
+
+### 2- Tasa de crecimiento de las exportaciones
+
+Se utilizó una base de datos de exportaciones por aduana tomada del Banco Central del periodo de enero del 2016 a diciembre del 2022:
+
+```{r db_ex, echo=TRUE, message=FALSE, warning=FALSE, comment='', collapse=TRUE}
+
+datos_ex <-  read.xlsx("D:\\Programa ECD\\M3\\proyecto\\db\\04. Export. o Import. por Aduana.xlsx", startRow = 7)
+
+datos_ex %>% 
+  head() %>% 
+  kable()
+```
+
+La base de dato se manipuló para ajustarla a un formato adecuado para el desarrollo del modelo:
+
+```{r db_ex2, warning=FALSE}
+db_ex <- datos_ex %>%
+  filter(X1!='TOTALES:') %>% 
+  select(-X1) %>% 
+  t() %>% 
+  as.data.frame()
+
+colnames(db_ex) <- db_ex[1,]
+
+db_ex <- db_ex %>% 
+  mutate(Periodo = ifelse(row_number() %% 2 == 0, rownames(db_ex), NA)) %>%
+  fill(Periodo) %>% 
+  select(Periodo, everything()) %>% 
+  filter(Aduana!='Aduana')
+
+rownames(db_ex) <- NULL
+
+db_ex <- db_ex %>% 
+  pivot_longer(cols = colnames(.)[c(-1, -2)], names_to = "Salida", values_to = 'Metrica') %>% 
+  pivot_wider(names_from = 'Aduana', values_from = 'Metrica') %>% 
+  rename(Aduana=Salida, TM='TM (Peso Neto)') %>% 
+  mutate(TM=round(as.numeric(TM),2), FOB=round(as.numeric(FOB),2))
+
+db_ex %>% 
+  head() %>% 
+  kable()
+```
+
+Toneladas métricas y FOB (en millones de USD) sumadas por mes:
+
+```{r db_ex3, warning=FALSE}
+ex_ag <-  db_ex %>% 
+  group_by(Periodo) %>% 
+  summarize(TM = sum(TM, na.rm=T), FOB = sum(FOB, na.rm = T))
+
+tsexp <- ts(ex_ag, start=c(2016, 1), frequency = 12)
+
+tsexp %>% 
+  head()
+```
+
+```{r tsexp, fig.align='center'}
+plot(tsexp[, 'FOB'], xlab='Periodo', ylab='FOB (millones de USD)')
+```
+
+La variable dependiente del modelo es el logaritmo natural del FOB (free on board), que indica el precio de un producto incluyendo los costos de transporte hasta el puerto de embarque.
+
+```{r}
+tasa_ex <- tslm(log(tsexp[, 'FOB']) ~ trend, data=tsexp)
+summary(tasa_ex)
+```
+
+Cálculo de la tasa de crecimiento:
+
+```{r}
+(exp(tasa_ex$coefficients[2])-1)*100
+```
+
+La tasa de crecimiento de las exportaciones es del 0.78% mensual entre enero del 2016 y diciembre del 2022.
+
+## Sección B.-
+
+El modelo de regresión fue tomado del libro [An Introduction to Statistical Learning with Applications in R Second Edition](https://www.statlearning.com/). Se utilizó el dataset [Advertising.csv](https://www.statlearning.com/s/Advertising.csv).
+
+### 1- Modelo de regresión de ventas
+
+El objetivo de este modelo es predecir los productos vendidos (en miles de unidades) en función del presupuesto invertido en publicidad (USD) en radio, periódicos y TV.
+
+```{r}
+db_publicidad <- read.csv("D:\\Programa ECD\\M3\\proyecto\\db\\Advertising.csv")
+
+db_publicidad %>% 
+  head() %>% 
+  kable()
+```
+
+```{r}
+mpublicidad <- lm(sales ~ TV + radio + newspaper, data=db_publicidad)
+
+summary(mpublicidad)
+```
+
+#### Interpretación de coeficientes.
+
+-   2.94 son las ventas sin intervención de las variables independientes.
+-   El incremento en una unidad de TV dará como resultado un incremento de 0.046 unidades en sales.
+-   El incremento en una unidad de radio dará como resultado un incremento de 0.19 unidades en sales.
+-   El incremento en una unidad de newspaper dará como resultado una disminución de 0.001 unidades en sales.
+
+#### Tests de significancia individual.
+
+-   *Intercepto*
+
+H0: β0=0\
+H1: β0!=0\
+
+|t| = 9.42\
+
+Dado que |t|>2 se rechaza la hipótesis nula en favor de la alterna y se concluye que el intercepto sí tiene significancia para el modelo.\
+
+-   *Parámetro para TV*
+
+H0: βTV=0\
+H1: βTV!=0\
+
+|t| = 32.81\
+
+Dado que \|t\|\>2 se rechaza la hipótesis nula en favor de la alterna y se concluye que el párametro para TV sí tiene significancia para el modelo.\
+
+-   *Parámetro para radio*
+
+H0: βradio=0\
+H1: βradio!=0\
+
+|t| = 21.9\
+
+Dado que \|t\|\>2 se rechaza la hipótesis nula en favor de la alterna y se concluye que el párametro para radio sí tiene significancia para el modelo.\
+
+-   *Parámetro para newspaper*
+
+H0: βnewspaper=0\
+H1: βnewspaper!=0\
+
+|t| = 0.18\
+
+Dado que \|t\|\<2 no se puede rechazar la hipótesis nula en favor de la alterna y se concluye que el párametro para newspaper no tiene significancia para el modelo.\
+
+### 2- Identificación de problemas.
+
+#### Autocorrelación.
+
+Prueba de hipótesis:\
+
+H0: No hay autocorrelación\
+H1: Hay autocorrelación\
+
+```{r}
+dwtest(mpublicidad)
+```
+
+Dado que el valor p es mayor a 0.05 no se puede rechazar la hipótesis nula y se concluye que no hay autocorrelación. Además, de acuerdo con la teoría, si el estadístico Durbin-Watson es cercano a 2 entonces es indicativo de que no hay autocorrelación.
+
+#### Heterocedasticidad
+
+Prueba de hipótesis con los contrastes formalmente establecidos:\
+
+H0: El modelo no presenta heterocedasticidad\
+H1: El modelo presenta heterocedasticidad
+
+- *Breusch-Pagan*
+
+```{r het2, fig.align='center', warning=FALSE}
+bptest(mpublicidad)
+```
+
+De acuerdo con el contraste BP el valor p es mayor a 0.05 por lo que no se puede rechazar la hipótesis nula y se concluye que el modelo no presenta heterocedasticidad.
+
+- *NCV*
+
+```{r het, fig.align='center', warning=FALSE}
+ncvTest(mpublicidad)
+```
+
+De acuerdo con el contraste NCV el valor p es menor a 0.05 por lo que se rechaza la hipótesis nula y se concluye que el modelo presenta heterocedasticidad.
+
+- *Goldfeld - Quandt*
+
+```{r}
+gqtest(mpublicidad, order.by = ~TV, data=db_publicidad)
+```
+
+De acuerdo con el contraste GQ el valor p es mayor a 0.05 por lo que no se puede rechazar la hipótesis nula y se concluye que el modelo no presenta heterocedasticidad en la variable TV.
+
+```{r}
+gqtest(mpublicidad, order.by = ~radio, data=db_publicidad)
+```
+
+De acuerdo con el contraste GQ el valor p es menor a 0.05 por lo que se rechaza la hipótesis nula y se concluye que el modelo presenta heterocedasticidad en la variable radio.
+
+```{r}
+gqtest(mpublicidad, order.by = ~newspaper, data=db_publicidad)
+```
+
+De acuerdo con el contraste GQ el valor p es mayor a 0.05 por lo que no se puede rechazar la hipótesis nula y se concluye que el modelo no presenta heterocedasticidad en la variable newspaper.
+
+- *Análisis*
+
+De acuerdo con el contraste Breusch-Pagan el modelo no presenta heterocedasticidad, sin embargo, hay dos contrastes (NVC Y Goldfeld - Quandt) que sí encontraron este problema. Por lo tanto, se procede a atenuar.
+
+- *Método de atenuación HAC*
+
+```{r}
+mphac <- coeftest(mpublicidad, vcov=vcovHC(mpublicidad))
+
+mphac
+```
+
+#### Multicolinealidad.
+
+```{r message=FALSE, fig.align='center'}
+ggpairs(db_publicidad[,2:5])
+```
+
+Se observa que los coeficientes de correlación de las variables son menores a 0.90 lo que indica que no hay un problema de multicolinealidad.
+
+```{r}
+vif(mpublicidad)
+```
+
+Los valores del factor de inflación de la varianza de cada variable son menores a 10 por lo que se descarta la multicolinealidad.
+
+### 3- Contrastes de estabilidad.
+
+*Análisis gráfico:*
+
+```{r}
+ols <- efp(mpublicidad, data = durab, type = "OLS-CUSUM")
+
+plot(ols)
+```
+
+```{r}
+olsms  <- efp(mpublicidad, data = durab, type = "OLS-MOSUM")
+
+plot(olsms)
+```
+
+En ambas gráficas se observa que la curva se encuentra dentro de los intervalos de confianza.\
+
+*Contraste de hipótesis:*
+
+H0: No hay cambio estructural.\
+H1: Hay cambio estructural.\
+
+```{r}
+sctest(mpublicidad, type="OLS-CUSUM", data=reg)
+```
+
+Dado que el valor p no es menor a 0.05 no se puede rechazar la hipótesis nula y se concluye que no existe un cambio estructural. Por lo tanto, los parámetros son estables y el modelo se puede usar para realizar predicciones.
