@@ -1,0 +1,324 @@
+---
+title: "Proyecto de fin de módulo 4"
+author: "Héctor Villegas"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+*Librerías*
+
+```{r librerías, echo=TRUE, message=FALSE, warning=FALSE}
+library(openxlsx)
+library(gmodels)
+library(ResourceSelection)
+library(ROCR)
+library(memisc)
+library(QuantPsyc)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(reshape2)
+```
+
+### 1- Base de datos
+
+```{r}
+data_gc <- read.csv("D:\\Programa ECD\\M4\\proyecto\\db\\germancredit.csv")
+
+data_gc %>% 
+  head() %>% 
+  kable()
+```
+
+### 2- Modelos de probabilidad
+
+*Descripción de las variables seleccionadas:*
+
+- Default: 1=mal pagador
+- duration: plazo de la operación
+- amount: monto de la operación
+- installment: cuotas pagadas
+- age: edad
+- cards: número de tarjetas de crédito
+
+Se define una nueva variable ageq que almacenará la edad al cuadrado.
+
+```{r}
+db_gc <- data_gc %>%
+  dplyr::select(Default, duration, amount, installment, age, cards) %>% 
+  mutate(ageq=(age)^2)
+
+attach(db_gc)
+
+db_gc %>% 
+  head() %>% 
+  kable()
+```
+
+*Modelo Logit*
+
+```{r}
+logit=glm(Default~., family = binomial(link="logit"),
+          data=db_gc)
+```
+
+*Modelo Probit*
+
+```{r}
+probit=glm(Default~., family = binomial(link="probit"),
+          data=db_gc)
+```
+
+*Resultados*
+
+```{r}
+mtable(logit,probit,digits = 6,sdigits = 3)
+```
+Se observa que en el modelo Probit la variable que más influye en la probabilidad de ser un mal pagador es installment (cuotas pagadas).\
+
+Para analizar el modelo Logit se procede con el cálculo de los odds ratios:
+
+```{r}
+exp(coef(logit))
+```
+A medida que installment crece es 1.24 veces más probable que un cliente sea un mal pagador.
+
+
+### 3- Evaluación de modelos
+
+#### Contraste HL
+
+H0: La bondad de ajuste es buena \
+H1: La bondad de ajuste no es buena
+
+*Logit*
+
+```{r}
+hoslem.test(db_gc$Default, 
+                   fitted(logit), g=10)
+```
+
+*Probit*
+
+```{r}
+hoslem.test(db_gc$Default, 
+                   fitted(probit), g=10)
+```
+De acuerdo con el contraste Hosmer and Lemeshow ejecutado sobre ambos modelos, el valor p es mayor a 0.05 por lo que no se puede rechazar la hipótesis nula y se concluye que la bondad de ajuste es buena tanto para Logit y Probit.
+
+#### Matriz de confusión
+
+Para construir la matriz de confusión se establece como umbral el promedio de los valores ajustados: 
+
+*Logit*
+
+```{r}
+umbral_lo <- mean(fitted(logit))
+umbral_lo
+```
+
+```{r}
+ClassLog(logit,db_gc$Default, cut = umbral_lo)
+```
+
+*Probit*
+
+```{r}
+umbral_po <- mean(fitted(probit))
+umbral_po
+```
+
+
+```{r}
+ClassLog(probit,db_gc$Default, cut = umbral_po)
+```
+#### Curva ROC
+
+*Logit*
+
+```{r}
+pred_lo <- prediction(logit$fitted.values, db_gc$Default)
+```
+
+
+```{r fig.align='center', fig.height=4, fig.width=7}
+perf_lo <- performance(pred_lo, 
+                    measure = "tpr", 
+                    x.measure = "fpr") 
+plot(perf_lo, colorize=T,lty=3)
+abline(0,1,col="black")
+```
+
+Área bajo la curva:
+
+```{r}
+aucl <- performance(pred_lo, measure = "auc")
+
+aucl@y.values[[1]]
+```
+Analizando el gráfico se observa que la curva ROC está cercana a la recta identidad que representa al clasificador aleatorio, lo cual indica que el modelo Logit no tiene una precisión muy alta. Esto se ve reflejado en el valor del AUC que es de 0.66.
+
+*Probit*
+```{r}
+pred_pr <- prediction(probit$fitted.values, db_gc$Default)
+```
+
+
+```{r fig.align='center', fig.height=4, fig.width=7}
+perf_pr <- performance(pred_pr, 
+                    measure = "tpr", 
+                    x.measure = "fpr")
+
+plot(perf_pr, colorize=T,lty=3)
+abline(0,1,col="black")
+```
+
+Área bajo la curva:
+
+```{r}
+aucp <- performance(pred_pr, measure = "auc")
+
+aucp@y.values[[1]]
+```
+La curva ROC del modelo Probit tiene un comportamiento parecido a la del Logit, está muy cerca de la recta identidad y el  valor del AUC es de 0.66.
+
+#### Punto de corte óptimo
+
+El punto de corte óptimo es aquel donde la sensibilidad y la especifidad se cortan. Para encontrarlo y graficarlo se define la siguiente función:
+
+```{r}
+plot_cutoff <- function(prediction.obj, title) {
+  
+  # Obtener los valores de sensibilidad y especificidad
+  perf <- performance(prediction.obj, "sens", "spec")
+  sen <- slot(perf, "y.values")[[1]]
+  esp <- slot(perf, "x.values")[[1]]
+  alf <- slot(perf, "alpha.values")[[1]]
+  
+  # Obtener el punto de intersección
+  diff <- abs(sen - esp)
+  index <- which.min(diff)
+  intersec_alf <- alf[index]
+  intersec_value <- sen[index]
+  
+  # Crear el dataframe
+  mat <- data.frame(alf, sen, esp)
+  mat <- melt(mat, id.vars = "alf")
+  
+  # Crear el gráfico
+  ggplot(mat) +
+    aes(x = alf, y = value, group = variable, colour = variable) +
+    geom_line(linewidth = 0.8) +
+    geom_point(aes(x = intersec_alf, y = intersec_value), color = "red", size = 3) +
+    geom_text(aes(x = intersec_alf, y = intersec_value, label = round(intersec_alf, 2)),
+              vjust = -1.5, hjust = 1, color = "black", size = 3) +
+    labs(
+      title = title,
+      x = 'Threshold',
+      y = 'Value'
+    ) +
+    scale_color_manual(values = c("#ADD8E6", "#98FB98"),
+                       labels = c('Sensibilidad', 'Especificidad')) +
+    theme_minimal() +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+      panel.grid.major = element_blank(),  # Eliminar la cuadrícula mayor
+      panel.grid.minor = element_blank()   # Eliminar la cuadrícula menor
+    )
+}
+```
+
+
+*Logit*
+
+```{r fig.align='center', fig.height=4, fig.width=7}
+
+plot_cutoff(pred_lo, "Punto de corte para logit")
+```
+
+
+*Probit*
+
+```{r fig.align='center', fig.height=4, fig.width=7}
+
+plot_cutoff(pred_pr, "Punto de corte para logit")
+```
+
+Los umbrales óptimos son iguales a los que se habían definido mediante el promedio de los valores ajustados, por lo que no habrá diferencia en la reclasificación.
+
+### 4- Reclasificación
+
+*Logit*
+
+```{r}
+ClassLog(logit,db_gc$Default, cut = 0.29)
+```
+Sensibilidad: tp/(tp+fn)
+
+
+```{r}
+176/(176 + 124)
+```
+
+Especifidad: tn/(tn+fp)
+
+```{r}
+420/(420 + 280)
+```
+
+*Probit*
+
+```{r}
+ClassLog(probit,db_gc$Default, cut = 0.29)
+```
+
+Sensibilidad: tp/(tp+fn)
+
+```{r}
+176/(176 + 124)
+```
+
+Especifidad: tn/(tn+fp)
+
+```{r}
+418/(418 + 282)
+```
+
+### 5- Proyección
+
+*Datos*
+
+```{r}
+newdata <- data.frame(duration=7,
+                      amount=1600,
+                      installment=8,
+                      age=32,
+                      ageq=1024,
+                      cards=2)
+```
+
+
+*Logit*
+
+```{r}
+predict(logit,newdata,type = "response")
+```
+
+*Probit*
+
+```{r}
+predict(probit,newdata,type = "response")
+```
+La probabilidad de que el cliente sea un mal pagador es del 40% con ambos modelos. Dado que el umbral es de 0.29 se concluye que esta persona no pagará el crédito.
+
+### 6- Análisis
+
+Tras evaluar ambos modelos, logit y probit, a través de varias métricas de rendimiento, se puede concluir lo siguiente:
+
+1. **Significancia**: Ambos modelos tienen parámetros significativos.
+   
+1. **Especificidad y Sensibilidad**: Las métricas de especificidad y sensibilidad son similares entre ambos modelos.
+
+3. **Área Bajo la Curva (AUC)**: El AUC tanto del modelo Logit como del modelo Probit es de 0.65. Ambos modelos presentan un rendimiento similar en términos de discriminación entre las clases.
+
+Dado que ambos modelos presentan un rendimiento similar, y considerando la mayor familiaridad y uso extendido del modelo logit en la industria, me inclinaría por este último. Sin embargo, debido a que el AUC no es muy alto, no recomendaría su uso en un escenario real.
