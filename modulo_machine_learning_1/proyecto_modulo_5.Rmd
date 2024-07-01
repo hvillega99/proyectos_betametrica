@@ -1,0 +1,160 @@
+---
+title: "Proyecto de fin de módulo 5"
+author: "Héctor Villegas"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+*Librerías*
+
+```{r librerías, echo=TRUE, message=FALSE, warning=FALSE}
+library(openxlsx)
+library(cluster)
+library(factoextra)
+library(NbClust)
+library(knitr)
+library(dplyr)
+```
+
+### 1- Base de datos
+
+```{r}
+data <- read.xlsx("D:\\Programa ECD\\M5\\proyecto\\db\\BOL_BP_MAY_ 2017.xlsx", 
+                  sheet = 'INDICADORES', startRow = 8)
+
+data %>% 
+  head()%>% 
+  kable()
+```
+
+Se modificó la base de datos para darle un formato apropiado para el análisis clúster y seleccionar las variables de interés.
+
+```{r}
+bancos_db <- data %>% 
+  filter(NOMBRE.DEL.INDICADOR %in% 
+           c('ACTIVOS PRODUCTIVOS / TOTAL ACTIVOS', 
+             'MOROSIDAD DE LA CARTERA TOTAL', 
+             'GASTOS DE OPERACION  / MARGEN FINANCIERO', 
+             'RESULTADOS DEL EJERCICIO / ACTIVO PROMEDIO', 
+             'FONDOS DISPONIBLES / TOTAL DEPOSITOS A CORTO PLAZO')) %>% 
+  select(-COD..MAF.) %>% 
+  t %>% 
+  as.data.frame()
+
+colnames(bancos_db) <- bancos_db[1,]
+
+bancos_db <- bancos_db[-1, ]
+
+
+
+bancos_db %>% 
+  kable()
+```
+
+Se filtraron los registros con variables nulas:
+
+```{r}
+bancos_db <- bancos_db %>% 
+  filter(complete.cases(.))
+
+str(bancos_db)
+```
+Las variables se convirtieron a tipo numérico y posteriormente se realizó el escalamiento:
+
+```{r}
+bancos_db <- bancos_db %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  scale()
+
+bancos_db %>% 
+  kable()
+```
+
+### 2- Clúster jerárquico
+
+Se utilizaron 2 métodos y 2 métricas de distancia.Luego de un análisis inicial se estableció el número de cortes en 4.
+
+*Usando método ward.D con distancias euclidiana y Manthattan*
+
+
+```{r fig.width=12, fig.height=8, fig.align='center'}
+cj1 <- hclust(dist(bancos_db, method = "euclidean"),
+                  method = "ward.D")
+```
+
+```{r fig.width=12, fig.height=8, fig.align='center'}
+cj2 <- hclust(dist(bancos_db, method = "manhattan"),
+                  method = "ward.D")
+```
+
+```{r fig.width=16, fig.height=8, fig.align='center'}
+par(mfrow=c(1,2))
+plot(cj1, hang = -0.01,cex=0.9)
+rect.hclust(cj1, k=4, border=c("red", "blue", "green", "purple"))
+plot(cj2, hang = -0.01,cex=0.9)
+rect.hclust(cj2, k=4, border=c("red", "blue", "green", "purple"))
+```
+
+La estructura de los dendrogramas es similar con diferencias menores entre las agrupaciones, lo que indica que los resultados son consistentes entre los métodos utilizados.
+
+*Usando método average con distancias euclidiana y Manthattan*
+
+```{r fig.width=12, fig.height=8, fig.align='center'}
+cj3 <- hclust(dist(bancos_db, method = "euclidean"),
+                  method = "average")
+```
+
+```{r fig.width=12, fig.height=8, fig.align='center'}
+cj4 <- hclust(dist(bancos_db, method = "manhattan"),
+                  method = "average")
+```
+
+```{r fig.width=16, fig.height=8, fig.align='center'}
+par(mfrow=c(1,2))
+plot(cj3, hang = -0.01,cex=0.9)
+rect.hclust(cj3, k=4, border=c("red", "blue", "green", "purple"))
+plot(cj4, hang = -0.01,cex=0.9)
+rect.hclust(cj4, k=4, border=c("red", "blue", "green", "purple"))
+```
+
+Ambos dendrogramas muestran una estructura similar, aunque el nivel en el que se agrupan las instituciones varía ligeramente entre los dos métodos de distancia. Esto indica que independientemente de la métrica las instituciones dentro de cada clúster son similares entre sí.
+
+### 2- Clúster no jerárquico
+
+Determinación del número óptimo de clústeres (k):
+ 
+```{r fig.align='center', warning=FALSE}
+k <- NbClust(bancos_db,
+                           distance = "euclidean",
+                           min.nc = 2,
+                           max.nc = 12,
+                           method="ward.D",
+                           index = "all")
+```
+
+De acuerdo con las métricas evaluadas el número óptimo de clústeres es k=2:
+
+```{r fig.width=8, fig.height=5, fig.align='center'}
+cnj <- kmeans(bancos_db,2)
+
+fviz_cluster(cnj,data=bancos_db, geom='point', pointsize = 3)
+```
+
+
+
+```{r fig.width=8, fig.height=5, fig.align='center'}
+silueta <- silhouette(cnj$cluster,dist(bancos_db,method="euclidean"))
+  
+fviz_silhouette(silueta)
+```
+
+
+Se realizó el análisis de silueta para evaluar la calidad del agrupamiento con k=2. El promedio de la anchura de la silueta es de 0.7, lo que indica que los clústeres están bien definidos y los datos están correctamente agrupados. Todos los valores son positivos acercándose a 1, lo que sugiere que los puntos están bien asignados a sus respectivos clústeres.
+
+*Resumen de clústeres*
+
+```{r}
+data.frame(cnj$cluster) %>%
+  kable()
+```
+
