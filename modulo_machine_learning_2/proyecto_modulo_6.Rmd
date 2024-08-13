@@ -1,0 +1,439 @@
+---
+title: "Proyecto de fin de módulo 6"
+author: "Héctor Villegas"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+*Librerías*
+
+```{r librerías, echo=TRUE, message=FALSE, warning=FALSE}
+library(foreign)
+library(dplyr)
+library(caret)
+library(ROCR)
+library(e1071)
+library(ROSE)
+library(pROC)
+library(knitr)
+library(reshape2)
+```
+
+## Sección A
+
+### Base de datos
+
+```{r}
+datos <- read.spss(file="D:\\Programa ECD\\M6\\proyecto\\db\\ENV_2017.sav",
+                   use.value.labels = F,
+                   to.data.frame = T,
+                   reencode = "UTF-8")
+
+head(datos) %>% 
+  kable()
+```
+
+Manipulación de base de datos:
+
+```{r}
+datos$prov_nac <- as.numeric(as.character(datos$prov_nac))
+```
+
+Se seleccionaron las variables peso, talla, semana de gestación, sexo, edad de la madre, la madre sabe leer y número de consultas prenatales.
+
+```{r}
+
+env <- datos %>% 
+  filter(prov_nac==13) %>% 
+  select(peso, talla, sem_gest, sexo, edad_mad, sabe_leer, con_pren) %>% 
+  filter(peso!=99, talla!=99, sem_gest!=99, con_pren!=99, sabe_leer!=99) %>% 
+  mutate(peso=if_else(peso>2500, 1, 0),
+         sexo=if_else(sexo==1, 0, 1),
+         sabe_leer=if_else(sabe_leer==1, 1, 0),
+         con_pren=if_else(con_pren>=7, 1, 0),
+         edad2=edad_mad^2)
+
+env$peso <- factor(env$peso)
+
+env <- env %>% 
+  mutate(peso=recode_factor(
+    peso,
+    `0`="no.adecuado",
+    `1`="adecuado"))
+
+env %>% 
+  head() %>% 
+  kable()
+
+```
+
+```{r}
+table(env$peso)
+```
+
+La base de datos está desbalanceada, hay más observaciones de la clase *adecuado* que de la clase *no.adecuado*.
+
+### División de datos
+
+Se seleccionó el 10% para entrenamiento.
+
+```{r}
+set.seed(1234)
+
+train.set <- createDataPartition(env$peso,
+                                     p=0.1,list=F)
+```
+
+### Tuning de hiperparámetros
+
+```{r}
+modelos <- tune(svm, 
+                peso~., 
+                data=env[train.set, ], 
+                ranges=list(cost=c(0.001, 0.01, 0.1, 1, 10),
+                            gamma=c(0.001, 0.01, 0.1, 1)),
+                scale=TRUE,
+                probability=TRUE)
+
+
+results <- modelos$performances
+```
+
+```{r}
+df_results <- as.data.frame(results)
+df_results$cost <- factor(df_results$cost)
+df_results$gamma <- factor(df_results$gamma)
+
+# Graficar el rendimiento del modelo en función del costo y gamma
+ggplot(df_results, aes(x=cost, y=gamma, fill=error)) +
+  geom_tile() +
+  scale_fill_gradient(low="white", high="red") +
+  labs(title="Performance del Modelo SVM",
+       x="Costo (Cost)",
+       y="Gamma",
+       fill="Error de Clasificación") +
+  theme_minimal()
+```
+
+El gráfico de calor muestra cómo varía el error de clasificación con diferentes combinaciones de cost y gamma. Las combinaciones con colores más oscuros indican un mayor error, mientras que los colores más claros indican un mejor rendimiento. Se observa que la mejor combinación es cost=10 y gamma=0.1.
+
+```{r}
+modelo <- modelos$best.model
+
+summary(modelo)
+```
+
+```{r}
+modelo$gamma
+```
+
+## Sección B
+
+### Matriz de clasificación
+
+```{r}
+pred <- predict(modelo,
+                env[train.set, ],
+                type='prob',
+                probability = T)
+```
+
+```{r}
+head(attr(pred, 'probabilities'), 5)
+```
+
+```{r}
+levels(pred)
+```
+
+```{r}
+levels(env$peso)
+```
+
+La clase positiva es *adecuado*.
+
+```{r}
+confusionMatrix(pred,
+                env$peso[train.set],
+                positive = levels(env$peso)[2])
+```
+
+-   Rendimiento General: El modelo tiene una precisión bastante alta del 93.0%. Esto sugiere que, en promedio, el modelo realiza un buen trabajo al clasificar las muestras.
+
+-   Clase Positiva ("adecuado"): El modelo tiene un alto rendimiento al identificar la clase "adecuado" con una sensitividad del 99.8%.
+
+-   Clase Negativa ("no.adecuado"): El modelo muestra una baja especificidad para la clase "no.adecuado" (25.7%). Esto indica que el modelo tiene problemas para identificar correctamente las instancias de "no.adecuado", lo cual es consecuencia del desbalance de clases.
+
+### Curva ROC
+
+```{r}
+y <- prediction(attr(pred, "probabilities")[,2],
+                   env$peso[train.set])
+
+perf <- performance(y,"tpr","fpr")
+plot(perf,colorize=T,lty=3)
+abline(0,1,col="black")
+```
+
+### Área bajo la curva
+
+```{r}
+auc <- performance(y,measure = "auc")
+auc@y.values[[1]]
+```
+
+### Punto de corte óptimo
+
+Se define la función plot.cutoff para encontrar el punto donde la sensibilidad y la especificidad se cortan:
+
+```{r}
+plot.cutoff <- function(prediction.obj, title) {
+  
+  # Obtener los valores de sensibilidad y especificidad
+  perf <- performance(prediction.obj, "sens", "spec")
+  sen <- slot(perf, "y.values")[[1]]
+  esp <- slot(perf, "x.values")[[1]]
+  alf <- slot(perf, "alpha.values")[[1]]
+  
+  # Obtener el punto de intersección
+  diff <- abs(sen - esp)
+  index <- which.min(diff)
+  intersec_alf <- alf[index]
+  intersec_value <- sen[index]
+  
+  # Crear el dataframe
+  mat <- data.frame(alf, sen, esp)
+  mat <- melt(mat, id.vars = "alf")
+  
+  # Crear el gráfico
+  ggplot(mat) +
+    aes(x = alf, y = value, group = variable, colour = variable) +
+    geom_line(linewidth = 0.8) +
+    geom_point(aes(x = intersec_alf, y = intersec_value), color = "red", size = 3) +
+    geom_text(aes(x = intersec_alf, y = intersec_value, label = round(intersec_alf, 2)),
+              vjust = -1.5, hjust = 1, color = "black", size = 3) +
+    labs(
+      title = title,
+      x = 'Threshold',
+      y = 'Value'
+    ) +
+    scale_color_manual(values = c("#ADD8E6", "#98FB98"),
+                       labels = c('Sensibilidad', 'Especificidad')) +
+    theme_minimal() +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+      panel.grid.major = element_blank(),  # Eliminar la cuadrícula mayor
+      panel.grid.minor = element_blank()   # Eliminar la cuadrícula menor
+    )
+}
+```
+
+```{r}
+plot.cutoff(y, 'Punto de corte óptimo')
+```
+
+Como consecuencia del desequilibrio de datos se obtuvo un umbral muy bajo el cual no es apropiado en este contexto para realizar la clasificación. Se opta por encontrar el punto donde se maximiza el accuracy.
+
+```{r}
+max.accuracy <- performance(y,measure = "acc")
+plot(max.accuracy)
+```
+
+```{r}
+indice <- which.max(slot(max.accuracy,"y.values")[[1]])
+acc <- slot(max.accuracy,"y.values")[[1]][indice]
+cutoff <- slot(max.accuracy,"x.values")[[1]][indice]
+
+c(accuracy=acc, cutoff=cutoff)
+```
+
+### Evaluación con punto de corte óptimo
+
+```{r}
+cutoff <- 0.28
+pred_binary <- ifelse(attr(pred, 'probabilities')[, 1] >= cutoff, levels(env$peso)[2], levels(env$peso)[1])
+pred_binary <- factor(pred_binary, levels = levels(env$peso))
+
+confusionMatrix(pred_binary, env$peso[train.set], positive = levels(env$peso)[2])
+```
+
+El punto de corte óptimo mejora ligeramente la sensibilidad. Sin embargo, también lleva a una disminución en la especificidad y una ligera disminución en la exactitud general y la precisión balanceada.
+
+### Predicción
+
+Generando nueva observación:
+
+```{r}
+new_data <- data.frame(
+  talla=43,
+  sem_gest=35,	
+  sexo=1,
+  edad_mad=25,	
+  sabe_leer=1,
+  con_pren=1,
+  edad2=625
+)
+
+```
+
+Predicción:
+
+```{r}
+pred_prob <- predict(modelo, new_data, type = 'prob', probability = T)
+```
+
+Aplicando punto de corte al 0.5:
+
+```{r}
+cutoff_default <- 0.5
+pred_binary_default <- ifelse(attr(pred_prob, 'probabilities')[, 1] >= cutoff_default, 
+                              levels(env$peso)[2], 
+                              levels(env$peso)[1])
+
+cat("Predicción con punto de corte al 0.5:", pred_binary_default)
+```
+
+Aplicando punto de corte óptimo:
+
+```{r}
+pred_binary_optimal <- ifelse(attr(pred_prob, 'probabilities')[, 1] >= cutoff, 
+                              levels(env$peso)[2], 
+                              levels(env$peso)[1])
+
+cat("Predicción con punto de corte óptimo (0.28):", pred_binary_optimal)
+```
+
+-   Predicción con Punto de Corte por Defecto (0.5):
+
+Si la probabilidad de la clase positiva es mayor o igual a 0.5, el nuevo vector se clasifica como la clase positiva.\\ Si la probabilidad es menor a 0.5, se clasifica como la clase negativa.
+
+-Predicción con Punto de Corte Óptimo (0.28):
+
+Si la probabilidad de la clase positiva es mayor o igual a 0.38, el nuevo vector se clasifica como la clase positiva.\\ Si la probabilidad es menor a 0.28, se clasifica como la clase negativa.
+
+## Sección C
+
+### Remuestreo con ROSE
+
+```{r}
+train.data <- env[train.set, ]
+
+data.rose  <- ROSE(peso ~., data = train.data, seed = 1)$data
+table(data.rose$peso)
+```
+
+```{r}
+svm.rose <- tune(svm, 
+     peso~., 
+     data=data.rose,
+     ranges=list(cost=c(0.001, 0.01, 0.1, 1, 10),
+                gamma=c(0.001, 0.01, 0.1, 1)),
+     kernel='radial',
+     scale=T,
+     probability=TRUE
+     )
+
+summary(svm.rose)
+```
+
+```{r}
+mejor.modelo.rose <- svm.rose$best.model
+
+pred.rose <- predict(mejor.modelo.rose, data.rose, type = 'prob', probability = T)
+
+head(attr(pred.rose, 'probabilities'))
+```
+
+```{r}
+levels(pred.rose)
+```
+
+```{r}
+levels(data.rose$peso)
+```
+
+```{r}
+confusionMatrix(pred.rose, data.rose$peso, positive = levels(pred.rose)[1])
+```
+
+```{r}
+y.rose <- prediction(attr(pred.rose, "probabilities")[, 2], data.rose$peso)
+
+perf.rose <- performance(y.rose,"tpr","fpr")
+
+plot(perf.rose,colorize=T,lty=3)
+abline(0,1,col="black")
+```
+
+```{r}
+auc.rose <- performance(y.rose,measure = "auc")
+auc.rose@y.values[[1]]
+```
+
+### Curvas ROC
+
+```{r}
+plot(perf,col='blue',lty=3)
+plot(perf.rose,col='red',lty=3, add=T)
+abline(0,1,col="black")
+legend("bottomright", legend = c("Modelo sin Remuestreo", "Modelo con ROSE"),
+       col = c("blue", "red"), lty = c(1, 2))
+```
+
+### Punto de corte óptimo
+
+```{r}
+plot.cutoff(y.rose, 'Intersección')
+```
+
+### Predicciones
+
+```{r}
+new_data
+```
+
+Predicción de modelo con remuestreo aplicando punto de corte óptimo:
+
+```{r}
+pred.rose <- predict(mejor.modelo.rose, new_data, type = 'prob', probability = T)
+
+pred.binary.rose <- ifelse(attr(pred.rose, 'probabilities')[, 1] >= 0.55, 
+                              levels(env$peso)[2], 
+                              levels(env$peso)[1])
+
+pred.binary.rose
+```
+
+Predicción de modelo sin remuestreo aplicando punto de corte óptimo:
+
+```{r}
+pred_binary_optimal
+```
+
+```{r}
+results <- data.frame(
+  pred_no_resampling = pred_binary_optimal,
+  pred_rose = pred.binary.rose,
+  stringsAsFactors = FALSE
+)
+
+results
+```
+
+### Conclusiones
+
+-   Mejora en la Balanced Accuracy:
+
+El modelo remuestreado muestra una Balanced Accuracy significativamente mejor (86.53%) en comparación con el modelo sin remuestreo (62.71%). Esto indica que el remuestreo ha mejorado el equilibrio en la capacidad del modelo para clasificar tanto los casos positivos como los negativos. Un mejor equilibrio entre sensibilidad y especificidad sugiere que el modelo remuestreado es más robusto en la identificación de ambas clases.
+
+-   Aumento en el Kappa:
+
+El valor de Kappa para el modelo remuestreado (0.7292) es considerablemente más alto que el del modelo sin remuestreo (0.3753). Esto refleja una mejor concordancia entre las predicciones y las verdaderas clases, ajustada por el azar. Un Kappa más alto indica que el remuestreo ha ayudado a mejorar la calidad general del modelo.
+
+-   Mejora en Specificity:
+
+La especificidad del modelo remuestreado (88.25%) es notablemente más alta que la del modelo sin remuestreo (25.65%). Esto significa que el modelo remuestreado es más efectivo en identificar correctamente los casos negativos ("no.adecuado"). La mejora en la especificidad es un indicativo de que el remuestreo ha ayudado a reducir el número de falsos positivos.
+
+-   Mejora en el AUC:
+
+El Área Bajo la Curva (AUC) para el modelo remuestreado es 0.94, mientras que para el modelo sin remuestreo es 0.83. Un AUC más alto indica una mejor capacidad del modelo para distinguir entre las clases. La mejora en el AUC sugiere que el remuestreo ha permitido al modelo capturar mejor las características distintivas entre las clases, resultando en una mejor capacidad de clasificación general.
