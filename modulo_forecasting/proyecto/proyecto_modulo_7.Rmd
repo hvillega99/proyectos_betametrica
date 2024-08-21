@@ -1,0 +1,221 @@
+---
+title: "Proyecto de fin de módulo 7"
+author: "Héctor Villegas"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+*Librerías*
+
+```{r, warning=FALSE, message=FALSE}
+library(openxlsx)
+library(forecast)
+library(knitr)
+library(dplyr)
+library(urca)
+```
+
+## Sección A
+
+### Base de datos
+
+Se utilizó una base de datos de inflación con frecuencia mensual desde enero del 2019 hasta diciembre del 2023 obtenida del Banco Central del Ecuador.
+
+```{r}
+db.inflacion <- read.xlsx("D:\\Programa ECD\\M7\\proyecto\\db\\G2.T2 Inflación Mensual (2005 - Actualidad).xlsx", startRow = 6)
+
+db.inflacion %>% 
+  head() %>% 
+  kable()
+```
+
+Se manipuló la base de datos para ajustarlas al formato adecuado, garantizando la coherencia de las variables a lo largo del periodo establecido.
+
+```{r}
+db.inflacion$AÑO <- seq(as.Date("2019/01/01"), as.Date("2023/12/01"), by="month")
+
+db.inflacion <- db.inflacion %>% 
+  rename(Periodo=AÑO,
+         Inflación=NACIONAL) %>% 
+  mutate(Inflación=Inflación*100)
+
+db.inflacion %>% 
+  kable()
+```
+
+### Comportamiento de la variable de estudio
+
+```{r, fig.align='center'}
+ts.inflacion <- ts(as.vector(as.matrix(db.inflacion$Inflación)),
+                   start = c(2019, 1), frequency = 12)
+
+ts.plot(ts.inflacion, xlab='Periodo', ylab='Inflación')
+```
+
+La gráfica de inflación muestra un comportamiento volátil, caracterizado por fluctuaciones significativas en un corto período de tiempo. Se observa una tendencia general ligeramente al alza, pero con picos y valles pronunciados.
+
+```{r, fig.align='center'}
+plot(stl(ts.inflacion, s.window = 'period'))
+```
+
+-   Tendencia: La componente de tendencia muestra un crecimiento gradual a lo largo del período analizado, con un ligero descenso a mediados de 2020 y una recuperación posterior.
+-   Estacionalidad: La componente estacional muestra fluctuaciones regulares a lo largo del tiempo, lo que indica la presencia de patrones estacionales en los datos. Es decir, la variable tiende a aumentar o disminuir en ciertos momentos del año de manera recurrente.
+-   Residuo: La componente de residuo, o ruido, representa la parte de la serie de tiempo que no puede ser explicada por la tendencia ni la estacionalidad. En este caso, el residuo muestra una alta volatilidad, con valores que oscilan de manera aleatoria alrededor de cero. Esto sugiere la presencia de un componente aleatorio o irregular en los datos.
+
+### Contrastes
+
+*Dickey-Fuller*
+
+```{r}
+adftest <- ur.df(ts.inflacion, type=c('trend'),
+                 selectlags = c('BIC'))
+summary(adftest)
+```
+
+Contraste de hipótesis:
+
+-   H0: La serie tiene una raíz unitaria (es no estacionaria).
+-   H1: La serie no tiene una raíz unitaria (es estacionaria).
+
+El valor del estadístico obtenido es -4.8272 el cual es mayor en valor absoluto que los valores críticos tau3 a todos los niveles de significancia. Por lo tanto, se tiene evidencia suficiente para rechazar la hipótesis nula y concluir que la serie no tiene raíz unitaria.
+
+*Phillips-Perron*
+
+```{r}
+pptest <- ur.pp(ts.inflacion, type=c('Z-tau'),
+                model=c('trend'),
+                lag=c("short"))
+
+summary(pptest)
+```
+
+Contraste de hipótesis:
+
+-   H0: La serie tiene una raíz unitaria (es no estacionaria).
+-   H1: La serie no tiene una raíz unitaria (es estacionaria).
+
+Dado que el valor del estadístico de prueba es mayor en valor absoluto que los valores críticos, se rechaza la hipótesis nula. Por lo tanto la serie es estacionaria según el test de Phillips-Perron.
+
+*KPSS*
+
+```{r}
+kpsstest <- ur.kpss(ts.inflacion, 
+                    type=c('tau'),
+                    lags = c('short'))
+
+summary(kpsstest)
+```
+
+Contraste de hipótesis:
+
+-   H0: La serie es estacionaria
+-   H1: La serie no es estacionaria
+
+El valor del estadístico es menor a todos los valores críticos, por lo tanto no se puede rechazar la hipótesis nula y se concluye que la serie es estacionaria.
+
+*Elliot, Rothenberg and Stock*
+
+```{r}
+erstest <- ur.ers(ts.inflacion,
+                  type=c('DF-GLS'),
+                  model=c('trend'),
+                  lag.max = 4)
+
+summary(erstest)
+```
+
+Contraste de hipótesis:
+
+-   H0: Raíz unitaria
+-   H1: No raíz unitaria
+
+Dado que el valor del test estadístico es menor en valor absoluto a todos los valores críticos no se puede rechazar la hipótesis nula y se concluye que la serie temporal tiene raíz unitaria y no es estacionaria.
+
+Todos los tests coinciden en que la serie es estacionaria por lo que no es necesario diferenciarla.
+
+## Sección B
+
+### Análisis de la autocorrelación
+
+*Función de Autocorrelación*
+
+```{r, fig.align='center'}
+par(mfrow=c(1, 2))
+Acf(ts.inflacion, main="Inflación")
+Pacf(ts.inflacion, main="Inflación")
+```
+
+-   Análisis de la estacionalidad:
+
+    En la gráfica de ACF los picos no son tan pronunciados a intervalos regulares, lo que sugiere que la estacionalidad no es un factor dominante. Mientras que en PACF no se observa un patrón de corte significativo en los rezagos que podrían sugerir una estacionalidad clara. Por lo tanto, un modelo SARIMA no parece necesario y podría utilizarse un modelo ARIMA.
+
+-   Selección del modelo ARIMA:
+
+    La ACF muestra un decaimiento lento con algunos rezagos significativos, lo cual sugiere la presencia de un componente autoregresivo (AR). Además, la PACF se corta abruptamente después de los primeros rezagos, lo que es típico de un proceso AR de bajo orden.
+
+El modelo propuesto es un ARMA(1, 1)
+
+### Modelo
+
+```{r, warning=FALSE, message=FALSE}
+arma11 <- arima(ts.inflacion, order = c(1, 0, 1), fixed = c(0, NA, NA))
+
+arma11
+```
+
+```{r}
+accuracy(arma11)
+```
+
+```{r}
+Box.test(arma11$residuals, type=c('Ljung-Box'))
+```
+
+Contraste de hipótesis:
+
+H0: Los residuos son independientes\
+H1: Los residuos no son independientes\
+
+Dado que p-value es mayor a 0.05 no se puede rechazar la hipótesis nula y se concluye que los residuos son independientes.
+
+```{r, fig.align='center'}
+par(mfrow=c(1, 2))
+Acf(arma11$residuals)
+Pacf(arma11$residuals)
+```
+
+### Pronósticos
+
+Pronóstico con el modelo seleccionado
+
+```{r, fig.align='center'}
+pronosticos_manual <- forecast(arma11, h = 4)
+plot(pronosticos_manual)
+```
+
+Pronóstico con auto.arima
+
+```{r, fig.align='center'}
+modelo_auto <- auto.arima(ts.inflacion)
+pronosticos_auto <- forecast(modelo_auto, h = 4)
+plot(pronosticos_auto)
+```
+
+```{r}
+accuracy(modelo_auto)
+```
+
+```{r, fig.align='center'}
+# Gráfico comparativo
+plot(ts.inflacion, type = "l", col = "black", ylim = range(ts.inflacion, pronosticos_manual$mean, pronosticos_auto$mean), ylab = "Inflación", xlab = "Período")
+lines(fitted(arma11), col = "blue", lty = 2)
+lines(fitted(modelo_auto), col = "red", lty = 3)
+lines(pronosticos_manual$mean, col = "blue")
+lines(pronosticos_auto$mean, col = "red")
+legend("topleft", legend = c("Original", "Modelo Manual", "Modelo Automático"), col = c("black", "blue", "red"), lty = c(1, 2, 3))
+
+```
+
+Ambos modelos, tanto el ARMA(1, 1) manual como el ARIMA (0, 0, 1) automático, presentan ajustes razonables a la serie de inflación, aunque con matices diferentes en cuanto a cómo capturan las variaciones de corto plazo. El ARMA(1, 1) manual parece ser un poco más sensible a las fluctuaciones, mientras que el ARIMA (0, 0, 1) es más suave.
+
+Si se comparan las métricas de ambos modelos se puede observar que son parecidas, sin embargo, podría ser útil investigar más para entender mejor los altos valores del MAPE y MPE, especialmente si los pronósticos se utilizan en un contexto donde los errores relativos son críticos.
